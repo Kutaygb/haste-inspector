@@ -7,7 +7,14 @@ import {
 } from "haste-wasm";
 import { useAtom } from "jotai";
 import { CogIcon, Link2Icon, Link2OffIcon } from "lucide-react";
-import { useCallback, useMemo, useRef, useState, useTransition } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useTransition,
+} from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import DemFilterBar, { type UpdateEventHandler } from "./DemFilterBar";
 import {
@@ -29,6 +36,20 @@ const DEFAULT_SHOW_ENTITY_INDEX = false;
 const DEFAULT_SHOW_FIELD_ENCODED_TYPE = true;
 const DEFAULT_SHOW_FIELD_DECODED_TYPE = false;
 const DEFAULT_SHOW_FIELD_PATH = false;
+
+function triggerDownload(filename: string, content: string, mimeType: string) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
 
 type EntityListPreferencesProps = {
   showEntityIndex: boolean;
@@ -349,18 +370,204 @@ function EntityFieldList() {
   );
   const [showFieldPath, setShowFieldPath] = useState(DEFAULT_SHOW_FIELD_PATH);
 
+  const [selectedFieldPaths, setSelectedFieldPaths] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const lastSelectedIndexRef = useRef<number | undefined>(undefined);
+
+  useEffect(() => {
+    lastSelectedIndexRef.current = undefined;
+    setSelectedFieldPaths((prev) => (prev.size ? new Set<string>() : prev));
+  }, [demSelectedEntityIndex, demView]);
+
+  useEffect(() => {
+    if (!filteredEntityFieldList?.length) {
+      lastSelectedIndexRef.current = undefined;
+      setSelectedFieldPaths((prev) => (prev.size ? new Set<string>() : prev));
+      return;
+    }
+
+    const availablePaths = new Set(
+      filteredEntityFieldList.map((item) => item.joinedNamedPath),
+    );
+
+    setSelectedFieldPaths((prev) => {
+      if (!prev.size) {
+        return prev;
+      }
+
+      let changed = false;
+      const next = new Set<string>();
+      prev.forEach((path) => {
+        if (availablePaths.has(path)) {
+          next.add(path);
+        } else {
+          changed = true;
+        }
+      });
+
+      return changed ? next : prev;
+    });
+  }, [filteredEntityFieldList]);
+
+  const selectedFields = useMemo(() => {
+    if (!filteredEntityFieldList || !selectedFieldPaths.size) {
+      return [];
+    }
+
+    return filteredEntityFieldList.filter((item) =>
+      selectedFieldPaths.has(item.joinedNamedPath),
+    );
+  }, [filteredEntityFieldList, selectedFieldPaths]);
+  const selectedFieldCount = selectedFields.length;
+
+  const visibleFields = filteredEntityFieldList ?? [];
+  const exportableFields = selectedFieldCount > 0 ? selectedFields : visibleFields;
+  const hasExportableFields = exportableFields.length > 0;
+  const counterValue = selectedFieldCount > 0 ? selectedFieldCount : visibleFields.length;
+
+  const selectedEntity = useMemo(() => {
+    demTick; // trick eslint
+
+    if (demSelectedEntityIndex === undefined) {
+      return undefined;
+    }
+
+    let entities: EntityLi[] | undefined;
+    if (demView === "entities") {
+      entities = demParser?.listEntities();
+    } else if (demView === "baselineEntities") {
+      entities = demParser?.listBaselineEntities();
+    }
+
+    return entities?.find((entity) => entity.index === demSelectedEntityIndex);
+  }, [demParser, demView, demSelectedEntityIndex, demTick]);
+  const selectedEntityName = selectedEntity?.name;
+
+  const baseFileName = useMemo(() => {
+    const prefix =
+      demView === "baselineEntities" ? "baseline-entity" : "entity";
+
+    if (demSelectedEntityIndex === undefined) {
+      return `${prefix}`;
+    }
+
+    const sanitizedName = selectedEntityName
+      ? selectedEntityName
+          .replace(/[^a-z0-9-_]+/gi, "_")
+          .replace(/_{2,}/g, "_")
+          .replace(/^_+|_+$/g, "")
+      : undefined;
+
+    const indexSegment = `${demSelectedEntityIndex}`;
+    return sanitizedName
+      ? `${prefix}-${indexSegment}-${sanitizedName}`
+      : `${prefix}-${indexSegment}`;
+  }, [demSelectedEntityIndex, demView, selectedEntityName]);
+
   const [, setDemSelectedEntityIndex] = useAtom(demSelectedEntityIndexAtom);
-  const handleClick = useCallback(
-    (ev: React.MouseEvent<HTMLLIElement>) => {
-      const entityIndex = +ev.currentTarget.dataset.entidx!;
-      if (entityIndex >= 0 && entityIndex <= Number.MAX_SAFE_INTEGER) {
+
+  const updateSelection = useCallback(
+    (event: React.MouseEvent, itemIndex: number, path: string) => {
+      if (!filteredEntityFieldList?.length) {
+        return;
+      }
+
+      setSelectedFieldPaths((prev) => {
+        if (event.shiftKey && lastSelectedIndexRef.current !== undefined) {
+          const start = Math.min(lastSelectedIndexRef.current, itemIndex);
+          const end = Math.max(lastSelectedIndexRef.current, itemIndex);
+          const next = new Set<string>();
+          for (let i = start; i <= end; i++) {
+            const listItem = filteredEntityFieldList[i];
+            if (listItem) {
+              next.add(listItem.joinedNamedPath);
+            }
+          }
+          return next;
+        }
+
+        if (event.metaKey || event.ctrlKey) {
+          const next = new Set(prev);
+          if (next.has(path)) {
+            next.delete(path);
+          } else {
+            next.add(path);
+          }
+          return next;
+        }
+
+        if (prev.size === 1 && prev.has(path)) {
+          return prev;
+        }
+
+        return new Set<string>([path]);
+      });
+
+      lastSelectedIndexRef.current = itemIndex;
+    },
+    [filteredEntityFieldList],
+  );
+
+  const handleFieldClick = useCallback(
+    (
+      event: React.MouseEvent<HTMLLIElement>,
+      itemIndex: number,
+      linkedEntityIndex: number | null,
+      path: string,
+    ) => {
+      updateSelection(event, itemIndex, path);
+
+      if (
+        linkedEntityIndex !== null &&
+        !event.metaKey &&
+        !event.ctrlKey &&
+        !event.shiftKey
+      ) {
         setDemSelectedEntityIndex((prevEntityIndex) =>
-          prevEntityIndex === entityIndex ? undefined : entityIndex,
+          prevEntityIndex === linkedEntityIndex ? undefined : linkedEntityIndex,
         );
       }
     },
-    [setDemSelectedEntityIndex],
+    [setDemSelectedEntityIndex, updateSelection],
   );
+
+  const handleExportRaw = useCallback(() => {
+    if (!exportableFields.length) {
+      return;
+    }
+
+    const lines = exportableFields.map(
+      (field) => `${field.joinedNamedPath}: ${field.inner.value}`,
+    );
+
+    const fileBase = `${baseFileName}-fields`;
+    triggerDownload(
+      `${fileBase}.txt`,
+      `${lines.join("\n")}\n`,
+      "text/plain;charset=utf-8",
+    );
+  }, [baseFileName, exportableFields]);
+
+  const handleExportJson = useCallback(() => {
+    if (!exportableFields.length) {
+      return;
+    }
+
+    const payload = exportableFields.map((field) => ({
+      path: field.joinedNamedPath,
+      encodedAs: field.inner.encodedAs,
+      decodedAs: field.inner.decodedAs,
+      value: field.inner.value,
+    }));
+
+    const fileBase = `${baseFileName}-fields`;
+    triggerDownload(
+      `${fileBase}.json`,
+      `${JSON.stringify(payload, null, 2)}\n`,
+      "application/json",
+    );
+  }, [baseFileName, exportableFields]);
 
   return (
     <div className="w-full h-full flex flex-col">
@@ -371,6 +578,27 @@ function EntityFieldList() {
         placehoder="filter entity fields…"
         endAdornment={
           <>
+            <Tooltip content="download visible fields as plain text">
+              <Button
+                size="small"
+                disabled={!hasExportableFields}
+                onClick={handleExportRaw}
+              >
+                export raw
+              </Button>
+            </Tooltip>
+            <Tooltip content="download visible fields as JSON">
+              <Button
+                size="small"
+                disabled={!hasExportableFields}
+                onClick={handleExportJson}
+              >
+                export json
+              </Button>
+            </Tooltip>
+            {counterValue > 0 && (
+              <span className="text-xs text-fg-subtle">{counterValue}</span>
+            )}
             <div className="w-px h-4 bg-divider" />
             <EntityFieldListPreferences
               showFieldEncodedType={showFieldEncodedType}
@@ -409,20 +637,30 @@ function EntityFieldList() {
             const linkedEntIdx = handleValid
               ? eHandleToIndex(+entityFieldItem.inner.value)
               : null;
+            const isSelected = selectedFieldPaths.has(
+              entityFieldItem.joinedNamedPath,
+            );
 
             return (
               <li
                 key={virtualItem.key}
                 className={cn(
-                  "haste-li haste-li__virtual flex items-center",
-                  handleValid && "haste-li__selectable",
+                  "haste-li haste-li__virtual haste-li__selectable flex items-center",
+                  isSelected && "haste-li__selected",
                 )}
                 style={{
                   height: `${virtualItem.size}px`,
                   transform: `translateY(${virtualItem.start}px)`,
                 }}
-                data-entidx={linkedEntIdx}
-                onClick={handleClick}
+                aria-selected={isSelected}
+                onClick={(event) =>
+                  handleFieldClick(
+                    event,
+                    virtualItem.index,
+                    linkedEntIdx,
+                    entityFieldItem.joinedNamedPath,
+                  )
+                }
               >
                 <span className="whitespace-nowrap gap-x-[1ch] flex items-center">
                   {showFieldPath && (
