@@ -6,7 +6,7 @@ import {
   eHandleToIndex,
 } from "haste-wasm";
 import { useAtom } from "jotai";
-import { CogIcon, Link2Icon, Link2OffIcon } from "lucide-react";
+import { BracesIcon, CogIcon, FileTextIcon, Link2Icon, Link2OffIcon } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -37,6 +37,9 @@ const DEFAULT_SHOW_FIELD_ENCODED_TYPE = true;
 const DEFAULT_SHOW_FIELD_DECODED_TYPE = false;
 const DEFAULT_SHOW_FIELD_PATH = false;
 
+const EXPORT_BUTTON_CLASS =
+  "h-auto gap-1 rounded-sm border border-divider/60 bg-transparent px-2 py-1 text-xs font-medium text-fg-subtle transition-colors hover:border-divider hover:bg-neutral-500/10 hover:text-fg";
+
 function triggerDownload(filename: string, content: string, mimeType: string) {
   if (typeof window === "undefined") {
     return;
@@ -50,6 +53,20 @@ function triggerDownload(filename: string, content: string, mimeType: string) {
   anchor.click();
   URL.revokeObjectURL(url);
 }
+
+type ExportEntityField = {
+  path: string;
+  pathSegments: number[];
+  encodedAs: string;
+  decodedAs: string;
+  value: string;
+};
+
+type ExportEntity = {
+  index: number;
+  name: string;
+  fields: ExportEntityField[];
+};
 
 type EntityListPreferencesProps = {
   showEntityIndex: boolean;
@@ -152,6 +169,95 @@ function EntityList() {
     DEFAULT_SHOW_ENTITY_INDEX,
   );
 
+  const isBaselineView = demView === "baselineEntities";
+  const baseFileName = useMemo(() => {
+    const prefix = isBaselineView ? "baseline-entities" : "entities";
+    const tickSegment = Number.isFinite(demTick) ? `tick-${demTick}` : undefined;
+    return tickSegment ? `${prefix}-${tickSegment}` : prefix;
+  }, [demTick, isBaselineView]);
+  const hasEntities = (entityList?.length ?? 0) > 0;
+
+  const collectEntitiesForExport = useCallback((): ExportEntity[] => {
+    if (!demParser) {
+      return [];
+    }
+
+    const listEntities = isBaselineView
+      ? demParser.listBaselineEntities.bind(demParser)
+      : demParser.listEntities.bind(demParser);
+    const listEntityFields = isBaselineView
+      ? demParser.listBaselineEntityFields.bind(demParser)
+      : demParser.listEntityFields.bind(demParser);
+
+    const entities = listEntities();
+    if (!entities?.length) {
+      return [];
+    }
+
+    return entities.map((entity) => ({
+      index: entity.index,
+      name: entity.name,
+      fields: (listEntityFields(entity.index) ?? []).map((field) => ({
+        path: field.namedPath.join("."),
+        pathSegments: Array.from(field.path),
+        encodedAs: field.encodedAs,
+        decodedAs: field.decodedAs,
+        value: field.value,
+      })),
+    }));
+  }, [demParser, isBaselineView]);
+
+  const handleExportAllRaw = useCallback(() => {
+    const entitiesForExport = collectEntitiesForExport();
+    if (!entitiesForExport.length) {
+      return;
+    }
+
+    const lines: string[] = [];
+    lines.push(`view: ${isBaselineView ? "baselineEntities" : "entities"}`);
+    lines.push(`tick: ${demTick}`);
+    lines.push("");
+
+    entitiesForExport.forEach((entity) => {
+      lines.push(`entity ${entity.index}: ${entity.name}`);
+      if (!entity.fields.length) {
+        lines.push("  (no fields)");
+      } else {
+        entity.fields.forEach((field) => {
+          lines.push(`  ${field.path}: ${field.value}`);
+        });
+      }
+      lines.push("");
+    });
+
+    const fileBase = `${baseFileName}-fields`;
+    triggerDownload(
+      `${fileBase}.txt`,
+      `${lines.join("\n").trimEnd()}\n`,
+      "text/plain;charset=utf-8",
+    );
+  }, [baseFileName, collectEntitiesForExport, demTick, isBaselineView]);
+
+  const handleExportAllJson = useCallback(() => {
+    const entitiesForExport = collectEntitiesForExport();
+    if (!entitiesForExport.length) {
+      return;
+    }
+
+    const payload = {
+      tick: demTick,
+      view: isBaselineView ? "baselineEntities" : "entities",
+      entities: entitiesForExport,
+    };
+
+    const fileBase = `${baseFileName}-fields`;
+    triggerDownload(
+      `${fileBase}.json`,
+      `${JSON.stringify(payload, null, 2)}\n`,
+      "application/json",
+    );
+  }, [baseFileName, collectEntitiesForExport, demTick, isBaselineView]);
+
   return (
     <div className="w-full h-full flex flex-col">
       <DemFilterBar
@@ -160,6 +266,24 @@ function EntityList() {
         placehoder="filter entities…"
         endAdornment={
           <>
+            <Tooltip content="download all entities as plain text">
+              <Button
+                size="small"
+                disabled={!hasEntities}
+                onClick={handleExportAllRaw}
+                className={EXPORT_BUTTON_CLASS}
+              >
+                <FileTextIcon className="h-3.5 w-3.5" /></Button>
+            </Tooltip>
+            <Tooltip content="download all entities as JSON">
+              <Button
+                size="small"
+                disabled={!hasEntities}
+                onClick={handleExportAllJson}
+                className={EXPORT_BUTTON_CLASS}
+              >
+                <BracesIcon className="h-3.5 w-3.5" /></Button>
+            </Tooltip>
             <div className="w-px h-4 bg-divider" />
             <EntityListPreferences
               showEntityIndex={showEntityIndex}
@@ -583,8 +707,10 @@ function EntityFieldList() {
                 size="small"
                 disabled={!hasExportableFields}
                 onClick={handleExportRaw}
+                className={EXPORT_BUTTON_CLASS}
               >
-                export raw
+                <FileTextIcon className="h-3.5 w-3.5" />
+                raw
               </Button>
             </Tooltip>
             <Tooltip content="download visible fields as JSON">
@@ -592,8 +718,10 @@ function EntityFieldList() {
                 size="small"
                 disabled={!hasExportableFields}
                 onClick={handleExportJson}
+                className={EXPORT_BUTTON_CLASS}
               >
-                export json
+                <BracesIcon className="h-3.5 w-3.5" />
+                json
               </Button>
             </Tooltip>
             {counterValue > 0 && (
