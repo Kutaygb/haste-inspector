@@ -12,6 +12,9 @@
     "haste-inspector:check": "bun --filter=haste-inspector run check"
   },
   "devDependencies": {
-    "@biomejs/biome": "1.9.2"
+    "@biomejs/biome": "2.2.4"
+  },
+  "dependencies": {
+    "caniuse-lite": "^1.0.30001743"
   }
 }
